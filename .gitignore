@@ -1,0 +1,7 @@
+.env
+__pycache__/
+.chroma/
+*.db
+codehealer-sandbox-*
+.venv/
+venv/
