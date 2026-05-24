@@ -19,12 +19,7 @@ from langchain_openai import ChatOpenAI
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from openai import OpenAI
 
-from codehealer_phase1 import (
-    AgentState,
-    CodeHealerEngine,
-    DockerSandboxExecutor,
-    LangChainCoder,
-)
+from core_engine import AgentState, CodeHealerEngine, DockerSandboxExecutor, LangChainCoder
 
 
 DEMO_TEST_CODE = """from solution import safe_divide
@@ -63,7 +58,7 @@ class RetrievedCodeFile:
 
 
 class GitHubConnector:
-    """封装 CodeHealer 需要的 GitHub 仓库、Issue、文件和 PR 操作。"""
+    """封装 CodeHealer 所需的 GitHub 仓库、Issue、文件和 PR 操作。"""
 
     def __init__(self, *, token: str, repo_full_name: str) -> None:
         if not token:
@@ -97,7 +92,7 @@ class GitHubConnector:
         raise RuntimeError("无法识别仓库默认分支，请确认仓库存在 main 或 master 分支。")
 
     def get_issue(self, issue_number: int) -> IssuePayload:
-        """读取指定 Issue 的标题和正文，作为 Agent 的任务描述。"""
+        """读取指定 Issue 的标题和正文，作为修复任务描述。"""
 
         try:
             issue: Issue = self._repo.get_issue(number=issue_number)
@@ -219,7 +214,6 @@ class GitHubConnector:
                 self._repo.create_git_ref(ref=f"refs/heads/{candidate}", sha=base_sha)
                 return candidate
             except GithubException as exc:
-                # 分支名已存在时 GitHub 通常返回 422，继续尝试下一个候选名。
                 if exc.status == 422:
                     last_error = exc
                     continue
@@ -251,12 +245,7 @@ class GitHubConnector:
 
 
 class CustomAliyunEmbeddings(Embeddings):
-    """阿里云通义千问 OpenAI 兼容 Embedding 适配器。
-
-    这里不使用 LangChain OpenAIEmbeddings 的默认 batch/token 处理，
-    而是直接调用 OpenAI SDK，确保发送到服务端的 JSON 形态是：
-    {"model": "text-embedding-v1", "input": ["..."]}
-    """
+    """阿里云通义千问 OpenAI 兼容 Embedding 适配器。"""
 
     def __init__(
         self,
@@ -278,15 +267,13 @@ class CustomAliyunEmbeddings(Embeddings):
         )
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        """批量生成文档向量，强制保证 input 是干净的 list[str]。"""
+        """批量生成文档向量，并确保 input 是干净的 list[str]。"""
 
         clean_texts = self._normalize_texts(texts)
         response = self._client.embeddings.create(
             model=self._model,
             input=clean_texts,
         )
-
-        # OpenAI/DashScope 兼容响应通常包含 index；按 index 排序可避免服务端重排。
         sorted_items = sorted(
             response.data,
             key=lambda item: item.index if item.index is not None else 0,
@@ -294,7 +281,7 @@ class CustomAliyunEmbeddings(Embeddings):
         return [list(item.embedding) for item in sorted_items]
 
     def embed_query(self, text: str) -> list[float]:
-        """生成查询向量，Chroma similarity_search 会调用这个方法。"""
+        """生成查询向量，供 Chroma similarity_search 使用。"""
 
         return self.embed_documents([text])[0]
 
@@ -309,7 +296,6 @@ class CustomAliyunEmbeddings(Embeddings):
             else:
                 normalized = str(text)
 
-            # DashScope 不喜欢空字符串；用单个空格占位，保持 list[str] 形态。
             clean_texts.append(normalized if normalized.strip() else " ")
 
         if not clean_texts:
@@ -322,7 +308,6 @@ class CodebaseRetriever:
 
     def __init__(self, *, connector: GitHubConnector) -> None:
         self._connector = connector
-        # 初始化时读取默认分支下的 .py 文件；测试文件和测试目录已在 connector 中过滤。
         self._code_files = list(connector.iter_python_files())
         self._file_content_by_path = {
             code_file.path: code_file.content for code_file in self._code_files
@@ -333,7 +318,7 @@ class CodebaseRetriever:
             raise RuntimeError("仓库默认分支下没有可检索的 Python 源码文件。")
 
     def build_vector_store(self) -> None:
-        """对代码分块并构建内存级 Chroma 向量库。"""
+        """对代码分块并构建进程内 Chroma 向量库。"""
 
         documents = [
             Document(
@@ -352,16 +337,11 @@ class CodebaseRetriever:
         if not chunks:
             raise RuntimeError("代码分块结果为空，无法构建向量库。")
 
-        openai_api_key = _get_required_env("OPENAI_API_KEY")
-        openai_api_base = os.getenv("OPENAI_API_BASE")
-
         embeddings = CustomAliyunEmbeddings(
             model="text-embedding-v1",
-            api_key=openai_api_key,
-            base_url=openai_api_base,
+            api_key=_get_required_env("OPENAI_API_KEY"),
+            base_url=os.getenv("OPENAI_API_BASE"),
         )
-
-        # 不设置 persist_directory，即为本次进程内的临时向量库。
         self._vector_store = Chroma.from_documents(
             documents=chunks,
             embedding=embeddings,
@@ -369,7 +349,7 @@ class CodebaseRetriever:
         )
 
     def search_relevant_file(self, issue_text: str) -> RetrievedCodeFile:
-        """根据 Issue 描述检索 Top-1 代码块，并返回其所属文件的完整内容。"""
+        """根据 Issue 描述检索 Top-1 代码块，并返回所属文件的完整内容。"""
 
         if self._vector_store is None:
             raise RuntimeError("向量库尚未构建，请先调用 build_vector_store()。")
@@ -410,18 +390,6 @@ def _build_llm() -> ChatOpenAI:
 
 
 def main() -> None:
-    # 自动加载当前目录下的 .env。
-    # Phase 4 需要的关键配置：
-    # OPENAI_API_KEY=...
-    # OPENAI_API_BASE=https://api.deepseek.com/v1
-    # LLM_MODEL_NAME=deepseek-chat
-    # GITHUB_TOKEN=...
-    # TARGET_REPO=owner/repo
-    # TARGET_ISSUE_NUMBER=1
-    #
-    # 如果聊天模型网关不支持 embeddings，可额外配置：
-    # OPENAI_EMBEDDING_API_BASE=https://api.openai.com/v1
-    # EMBEDDING_MODEL_NAME=text-embedding-3-small
     load_dotenv(override=True)
 
     github_token = _get_required_env("GITHUB_TOKEN")
@@ -437,7 +405,7 @@ def main() -> None:
     target_file_path = retrieved.file_path
     target_code = retrieved.content
 
-    print(f"💡 [RAG] 自动检索定位到疑似 Bug 文件: {target_file_path}")
+    print(f"[RAG] 自动检索定位到疑似 Bug 文件: {target_file_path}")
 
     initial_state: AgentState = {
         "task_description": issue.task_description,
@@ -454,7 +422,7 @@ def main() -> None:
     )
     result = engine.run(initial_state)
 
-    print("=== CodeHealer GitHub Agent Result ===")
+    print("=== CodeHealer Execution Report ===")
     print(f"resolved: {result['is_resolved']}")
     print(f"iterations: {result['iterations']}")
     print("=== sandbox_output ===")

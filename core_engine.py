@@ -49,7 +49,7 @@ class DockerSandboxExecutor:
             self._client = docker.from_env()
         except DockerException as exc:
             raise RuntimeError(
-                "Docker is not available. Please ensure Docker Desktop/daemon is running."
+                "Docker is not available. Please ensure Docker Desktop or the Docker daemon is running."
             ) from exc
 
     def run_pytest(self, *, target_code: str, test_code: str) -> SandboxExecutionResult:
@@ -88,9 +88,7 @@ class DockerSandboxExecutor:
                 return {"exit_code": exit_code, "output": output}
 
             except (TimeoutError, ReadTimeout):
-                timeout_message = (
-                    f"Sandbox timed out after {self._timeout_seconds} seconds."
-                )
+                timeout_message = f"Sandbox timed out after {self._timeout_seconds} seconds."
                 if container is not None:
                     self._kill_container(container)
                     output = self._read_logs(container)
@@ -153,7 +151,7 @@ class DockerSandboxExecutor:
 
 
 class LangChainCoder:
-    """LLM-backed coder with strict pure-code output constraints."""
+    """LLM-backed code repair component with strict pure-code output constraints."""
 
     SYSTEM_PROMPT = """You are CodeHealer's repair engine.
 You receive a Python source file and pytest failure output.
@@ -210,20 +208,9 @@ Return the complete fixed Python code only."""
         return "\n".join(lines)
 
 
-class MockCoder:
-    """Deterministic demo coder for running Phase 1 without external LLM credentials."""
-
-    def fix(self, *, task_description: str, target_code: str, sandbox_output: str) -> str:
-        if "ZeroDivisionError" in sandbox_output or "/ b" in target_code:
-            return """def safe_divide(a: float, b: float) -> float:
-    if b == 0:
-        return 0.0
-    return a / b
-"""
-        return target_code
-
-
 class CodeHealerEngine:
+    """Coordinates repair generation and sandbox verification with LangGraph."""
+
     def __init__(self, *, sandbox: DockerSandboxExecutor, coder: CodeFixer) -> None:
         self._sandbox = sandbox
         self._coder = coder
@@ -278,73 +265,3 @@ class CodeHealerEngine:
         if state["iterations"] >= 3:
             return "exhausted"
         return "retry"
-
-
-def build_demo_state() -> AgentState:
-    return {
-        "task_description": "Fix safe_divide so division by zero returns 0.0.",
-        "target_code": """def safe_divide(a: float, b: float) -> float:
-    return a / b
-""",
-        "test_code": """from solution import safe_divide
-
-
-def test_normal_division() -> None:
-    assert safe_divide(10, 2) == 5
-
-
-def test_division_by_zero_returns_zero() -> None:
-    assert safe_divide(10, 0) == 0.0
-""",
-        "sandbox_output": "",
-        "is_resolved": False,
-        "iterations": 0,
-    }
-
-
-if __name__ == "__main__":
-    try:
-        import os
-
-        from dotenv import load_dotenv
-        from langchain_openai import ChatOpenAI
-
-        # 自动读取当前目录下的 .env 文件。
-        # 运行前请复制 .env.example 为 .env，并填入真实 API Key。
-        load_dotenv()
-
-        openai_api_key = os.getenv("OPENAI_API_KEY")
-        openai_api_base = os.getenv("OPENAI_API_BASE")
-        llm_model_name = os.getenv("LLM_MODEL_NAME", "deepseek-chat")
-
-        if not openai_api_key:
-            raise RuntimeError(
-                "缺少 OPENAI_API_KEY。请先复制 .env.example 为 .env，并填写真实密钥。"
-            )
-
-        # ChatOpenAI 兼容 OpenAI 协议服务商：
-        # - OpenAI 官方：可不设置 OPENAI_API_BASE
-        # - DeepSeek/Qwen 等兼容服务：在 .env 中设置 OPENAI_API_BASE
-        real_llm = ChatOpenAI(
-            model=llm_model_name,
-            api_key=openai_api_key,
-            base_url=openai_api_base,
-            temperature=0.1,
-        )
-
-        engine = CodeHealerEngine(
-            sandbox=DockerSandboxExecutor(timeout_seconds=60),
-            coder=LangChainCoder(llm=real_llm),
-        )
-        result = engine.run(build_demo_state())
-
-        print("=== CodeHealer Phase 2 Result ===")
-        print(f"resolved: {result['is_resolved']}")
-        print(f"iterations: {result['iterations']}")
-        print("=== final target_code ===")
-        print(result["target_code"])
-        print("=== sandbox_output ===")
-        print(result["sandbox_output"])
-    except RuntimeError as exc:
-        print("=== CodeHealer Phase 2 Demo Could Not Start ===")
-        print(str(exc))
