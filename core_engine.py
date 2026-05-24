@@ -27,11 +27,11 @@ class SandboxExecutionResult(TypedDict):
 
 class CodeFixer(Protocol):
     def fix(self, *, task_description: str, target_code: str, sandbox_output: str) -> str:
-        """Return repaired pure Python source code."""
+        """返回修复后的完整 Python 源码。"""
 
 
 class DockerSandboxExecutor:
-    """Runs candidate code and pytest tests inside an isolated Docker container."""
+    """在隔离 Docker 容器中运行候选代码和 pytest 测试。"""
 
     def __init__(
         self,
@@ -49,11 +49,11 @@ class DockerSandboxExecutor:
             self._client = docker.from_env()
         except DockerException as exc:
             raise RuntimeError(
-                "Docker is not available. Please ensure Docker Desktop or the Docker daemon is running."
+                "Docker 不可用。请确认 Docker Desktop 或 Docker daemon 已启动。"
             ) from exc
 
     def run_pytest(self, *, target_code: str, test_code: str) -> SandboxExecutionResult:
-        """Execute pytest against target code and return combined logs plus exit code."""
+        """对目标代码执行 pytest，并返回合并日志和退出码。"""
 
         container: Optional[Container] = None
         with tempfile.TemporaryDirectory(prefix="codehealer-sandbox-") as temp_dir:
@@ -88,7 +88,7 @@ class DockerSandboxExecutor:
                 return {"exit_code": exit_code, "output": output}
 
             except (TimeoutError, ReadTimeout):
-                timeout_message = f"Sandbox timed out after {self._timeout_seconds} seconds."
+                timeout_message = f"沙箱执行超过 {self._timeout_seconds} 秒，已超时。"
                 if container is not None:
                     self._kill_container(container)
                     output = self._read_logs(container)
@@ -98,13 +98,13 @@ class DockerSandboxExecutor:
             except ImageNotFound as exc:
                 return {
                     "exit_code": 125,
-                    "output": f"Docker image not found and could not be pulled: {exc}",
+                    "output": f"Docker 镜像不存在且拉取失败：{exc}",
                 }
 
             except (APIError, DockerException, OSError) as exc:
                 return {
                     "exit_code": 125,
-                    "output": f"Docker sandbox execution failed: {type(exc).__name__}: {exc}",
+                    "output": f"Docker 沙箱执行失败：{type(exc).__name__}: {exc}",
                 }
 
             finally:
@@ -133,7 +133,7 @@ class DockerSandboxExecutor:
             raw_logs = container.logs(stdout=True, stderr=True)
             return raw_logs.decode("utf-8", errors="replace")
         except DockerException as exc:
-            return f"Failed to read container logs: {exc}"
+            return f"读取容器日志失败：{exc}"
 
     @staticmethod
     def _kill_container(container: Container) -> None:
@@ -151,7 +151,7 @@ class DockerSandboxExecutor:
 
 
 class LangChainCoder:
-    """LLM-backed code repair component with strict pure-code output constraints."""
+    """由大模型驱动的代码修复组件，严格约束输出为纯代码。"""
 
     SYSTEM_PROMPT = """You are CodeHealer's repair engine.
 You receive a Python source file and pytest failure output.
@@ -160,7 +160,7 @@ Do not include Markdown fences, explanations, comments outside the code, or pros
 
     def __init__(self, *, llm: Optional[Any] = None, model_name: Optional[str] = None) -> None:
         if llm is None and model_name is None:
-            raise ValueError("Provide either a LangChain chat model instance or model_name.")
+            raise ValueError("请提供 LangChain 聊天模型实例或 model_name。")
         self._llm = llm if llm is not None else self._init_model(model_name)
 
     def fix(self, *, task_description: str, target_code: str, sandbox_output: str) -> str:
@@ -181,11 +181,11 @@ Return the complete fixed Python code only."""
         )
         content = getattr(response, "content", response)
         if not isinstance(content, str):
-            raise TypeError(f"LLM returned unsupported response content: {type(content)!r}")
+            raise TypeError(f"LLM 返回了不支持的响应内容类型：{type(content)!r}")
 
         fixed_code = self._strip_markdown_fences(content).strip()
         if not fixed_code:
-            raise ValueError("LLM returned empty code.")
+            raise ValueError("LLM 返回了空代码。")
         return fixed_code
 
     @staticmethod
@@ -209,7 +209,7 @@ Return the complete fixed Python code only."""
 
 
 class CodeHealerEngine:
-    """Coordinates repair generation and sandbox verification with LangGraph."""
+    """使用 LangGraph 编排代码生成和沙箱验证闭环。"""
 
     def __init__(self, *, sandbox: DockerSandboxExecutor, coder: CodeFixer) -> None:
         self._sandbox = sandbox
